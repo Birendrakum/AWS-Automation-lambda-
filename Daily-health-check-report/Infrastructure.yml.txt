@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: "2026-06-05"
+Description: "Here are the steps to set up an AWS project using Auto Scaling Groups (ASG), EC2 instances, AWS Lambda, SNS and an Elastic Load Balancer (ELB)."
+
+Resources:
+  MyVPC:  
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "192.168.10.0/24"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  privateA: 
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.0/26"
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: "pvt-a"
+  
+  publicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.128/26"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: "pub-a"
+
+  RouterPub:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  RouterPvt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  MySubnetAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicA
+      RouteTableId: !Ref RouterPub
+  
+  MySubnetAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateA
+      RouteTableId: !Ref RouterPvt
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PubRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouterPub
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  MyEIP:
+    Type: AWS::EC2::EIP
+    
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt MyEIP.AllocationId
+      SubnetId: !Ref publicA
+
+  PvtRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouterPvt
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  SgLB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow Internet"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+
+  SgWebapp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow HTTP and Django from loadbalncer only"
+      VpcId: !Ref MyVPC
+
+  SgWebappIngressHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgWebapp
+      IpProtocol: "tcp"
+      FromPort: 8000
+      ToPort: 8000
+      SourceSecurityGroupId: !Ref SgLB
+
+  InternetLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: InternetLB
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SgLB
+      Subnets:
+        - !Ref publicA
+        - !Ref publicB
+
+  PrivateInstanceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: TargetGroup
+      VpcId: !Ref MyVPC
+      Protocol: HTTP
+      Port: 8000
+      TargetType: instance
+        
+  LoadbalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternetLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PrivateInstanceTargetGroup
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "MyEc2Template"
+      LaunchTemplateData:
+        ImageId: "ami-0953476d60561c955"
+        InstanceType: "t2.micro"
+        KeyName: "pem-key"
+        SecurityGroupIds:
+          - !Ref SgWebapp
+        UserData:
+          Fn::Base64: !Sub |
+			<!DOCTYPE html>
+			<html lang="en">
+			<head>
+			  <meta charset="UTF-8">
+			  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+			  <title>My Simple Website</title>
+			  <style>
+				body {
+				  font-family: Arial, sans-serif;
+				  margin: 0;
+				  padding: 0;
+				}
+				header {
+				  background: #4CAF50;
+				  color: white;
+				  padding: 15px;
+				  text-align: center;
+				}
+				nav {
+				  background: #333;
+				  padding: 10px;
+				}
+				nav a {
+				  color: white;
+				  margin: 0 10px;
+				  text-decoration: none
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref publicA
+      TargetGroupARNs:
+        - !Ref PrivateInstanceTargetGroup
+      MinSize: 2
+      MaxSize: 4
+      MetricsCollection:
+        - Granularity: "1Minute"
+
+  CPUAlarmHigh:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: "Scale out when CPU usage exceeds 70%"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref ScaleOutPolicy
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+
+  CPUAlarmLow:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: "Scale In when CPU usage below 50%"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: "LessThanThreshold"
+      AlarmActions:
+        - !Ref ScaleInPolicy
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+
+  ScaleOutPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: 2
+      Cooldown: 120
+
+  ScaleInPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: -1
+      Cooldown: 120    
