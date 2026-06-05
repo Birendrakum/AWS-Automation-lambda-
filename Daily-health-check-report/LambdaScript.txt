@@ -1,73 +1,111 @@
-import boto3
-import datetime
-import json
-
-def lambda_handler(event, context):
-    cloudwatch = boto3.client('cloudwatch')
-    autoscaling = boto3.client('autoscaling')
-    s3 = boto3.client('s3')
-
-    end_time = datetime.datetime.utcnow()
-    start_time = end_time - datetime.timedelta(hours=24)
-
-    # CPU Utilization
-    cpu_response = cloudwatch.get_metric_data(
-        MetricDataQueries=[
-            {
-                'Id': 'cpuUtil',
-                'MetricStat': {
-                    'Metric': {
-                        'Namespace': 'AWS/EC2',
-                        'MetricName': 'CPUUtilization',
-                        'Dimensions': [
-                            {'Name': 'AutoScalingGroupName', 'Value': 'my-asg'}
-                        ]
-                    },
-                    'Period': 3600,
-                    'Stat': 'Average'
-                },
-                'ReturnData': True
-            }
-        ],
-        StartTime=start_time,
-        EndTime=end_time
-    )
-
-    # Create JSON report
-    Report_data = {
-        'Health_check': {},
-        'Scaling_activity': {}
-    }
-
-    timestamps = cpu_response['MetricDataResults'][0]['Timestamps']
-    values = cpu_response['MetricDataResults'][0]['Values']
-
-    for i in range(len(timestamps)):
-        Report_data['Health_check'][str(timestamps[i])] = values[i]
-
-    # Scaling Activities
-    scaling_response = autoscaling.describe_scaling_activities(
-        AutoScalingGroupName='my-asg',
-        MaxRecords=10
-    )
-
-    for activity in scaling_response['Activities']:
-        Report_data['Scaling_activity'][activity['Cause']] = {
-            'StartTime': str(activity['StartTime']),
-            'Description': activity['Description']
-        }
-
-    # Convert to JSON
-    json_data = json.dumps(Report_data, default=str)
-
-    # Upload to S3
-    s3.put_object(
-        Bucket='my-report-bucket',
-        Key=f'reports/asg_report_{end_time.strftime("%Y%m%d%H%M%S")}.json',
-        Body=json_data
-    )
-
-    return {
-        'status': 'success',
-        's3_key': f'reports/asg_report_{end_time.strftime("%Y%m%d%H%M%S")}.json'
-    }
+          import boto3
+          import datetime
+          import json
+          import os
+          
+          autoscaling = boto3.client('autoscaling')
+          cloudwatch = boto3.client('cloudwatch')
+          s3 = boto3.client('s3')
+          
+          ASG_NAME = os.getenv('ASG_NAME')
+          BUCKET_NAME = os.getenv('BUCKET_NAME')
+          
+          def get_instance_cpu(instance_id, start_time, end_time):
+              response = cloudwatch.get_metric_statistics(
+                  Namespace='AWS/EC2',
+                  MetricName='CPUUtilization',
+                  Dimensions=[
+                      {'Name': 'InstanceId', 'Value': instance_id}
+                  ],
+                  StartTime=start_time,
+                  EndTime=end_time,
+                  Period=300,
+                  Statistics=['Average']
+              )
+          
+              datapoints = response.get('Datapoints', [])
+              if not datapoints:
+                  return 0
+          
+              latest = sorted(datapoints, key=lambda x: x['Timestamp'])[-1]
+              return round(latest['Average'], 2)
+          
+          
+          def lambda_handler(event, context):
+              end_time = datetime.datetime.utcnow()
+              start_time = end_time - datetime.timedelta(minutes=10)
+          
+              report = {}
+          
+              asg_response = autoscaling.describe_auto_scaling_groups(
+                  AutoScalingGroupNames=[ASG_NAME]
+              )
+          
+              if not asg_response.get('AutoScalingGroups'):
+                  return {
+                      'statusCode': 404,
+                      'body': f'ASG {ASG_NAME} not found'
+                  }
+          
+              asg = asg_response['AutoScalingGroups'][0]
+              
+              report['Time'] = end_time.isoformat()
+              report['asg_name'] = ASG_NAME
+              report['desired_capacity'] = asg.get('DesiredCapacity')
+              report['min_size'] = asg.get('MinSize')
+              report['max_size'] = asg.get('MaxSize')
+          
+              instance_report = []
+              total_cpu = 0.0
+              instance_count = 0
+          
+              for instance in asg.get('Instances', []):
+                  instance_id = instance.get('InstanceId')
+                  cpu = get_instance_cpu(instance_id, start_time, end_time)
+          
+                  total_cpu += cpu
+                  instance_count += 1
+          
+                  instance_report.append({
+                      'instance_id': instance_id,
+                      'lifecycle_state': instance.get('LifecycleState'),
+                      'health_status': instance.get('HealthStatus'),
+                      'cpu_utilization': cpu
+                  })
+          
+              average_cpu = round(total_cpu / instance_count, 2) if instance_count > 0 else 0
+          
+              report['instance_count'] = instance_count
+              report['average_cpu_utilization'] = average_cpu
+              report['instances'] = instance_report
+          
+              scaling_response = autoscaling.describe_scaling_activities(
+                  AutoScalingGroupName=ASG_NAME,
+                  MaxRecords=20
+              )
+          
+              activities = []
+              for activity in scaling_response.get('Activities', []):
+                  activities.append({
+                      'activity_id': activity.get('ActivityId'),
+                      'description': activity.get('Description'),
+                      'cause': activity.get('Cause'),
+                      'status': activity.get('StatusCode'),
+                      'start_time': str(activity.get('StartTime'))
+                  })
+          
+              report['scaling_activities'] = activities
+          
+              key = f"asg-reports/asg_report_{end_time.strftime('%Y%m%d_%H%M%S')}.json"
+          
+              s3.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key=key,
+                  Body=json.dumps(report, indent=4, default=str)
+              )
+          
+              return {
+                  'statusCode': 200,
+                  'report_location': f"s3://{BUCKET_NAME}/{key}",
+                  'average_cpu_utilization': average_cpu
+              }

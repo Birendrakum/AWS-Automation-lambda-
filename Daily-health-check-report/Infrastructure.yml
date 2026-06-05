@@ -1,0 +1,505 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Here are the steps to set up an AWS project using Auto Scaling Groups (ASG), EC2 instances, AWS Lambda, SNS and an Elastic Load Balancer (ELB)."
+
+Parameters:
+
+  ASGName:
+    Type: String
+    Default: my-asg
+
+  ReportBucketName:
+    Type: String
+    Default: my-report-bucket
+
+Resources:
+  MyVPC:  
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "192.168.10.0/24"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: MyVPC
+
+  privateA: 
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.0/26"
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: "pvt-a"
+
+  privateB: 
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.192/26"
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: "pvt-b"
+      
+  publicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.64/26"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: "pub-a"
+      
+  publicB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: "192.168.10.128/26"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: "pub-b"
+
+  RouterPub:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  RouterPvt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref MyVPC
+
+  MySubnetAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicA
+      RouteTableId: !Ref RouterPub
+  
+  MySubnetAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateA
+      RouteTableId: !Ref RouterPvt
+
+  MySubnetAssociation3:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicB
+      RouteTableId: !Ref RouterPub
+    
+  MySubnetAssociation4:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateB
+      RouteTableId: !Ref RouterPvt
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref MyVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PubRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouterPub
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  MyEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+    
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      AllocationId: !GetAtt MyEIP.AllocationId
+      SubnetId: !Ref publicA
+
+  PvtRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouterPvt
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway
+
+  SgLB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow Internet"
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 80
+          ToPort: 80
+          CidrIp: "0.0.0.0/0"
+
+  SgWebapp:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Allow HTTP and Django from loadbalncer only"
+      VpcId: !Ref MyVPC
+
+  SgWebappIngressHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SgWebapp
+      IpProtocol: "tcp"
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref SgLB
+
+  InternetLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: InternetLB
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SgLB
+      Subnets:
+        - !Ref publicA
+        - !Ref publicB
+
+  PrivateInstanceTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: TargetGroup
+      VpcId: !Ref MyVPC
+      Protocol: HTTP
+      Port: 80
+      TargetType: instance
+        
+  LoadbalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref InternetLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref PrivateInstanceTargetGroup
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: "MyEc2Template"
+      LaunchTemplateData:
+        ImageId: "ami-0953476d60561c955"
+        InstanceType: "t2.micro"
+        KeyName: "pem-key"
+        SecurityGroupIds:
+          - !Ref SgWebapp
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            apt update -y
+            apt install apache2 -y
+            cat <<EOF > /var/www/html/index.html
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>My Simple Website</title>
+              <style>
+              body {
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 0;
+              }
+              header {
+                background: #4CAF50;
+                color: white;
+                padding: 15px;
+                text-align: center;
+              }
+              nav {
+                background: #333;
+                padding: 10px;
+              }
+              nav a {
+                color: white;
+                margin: 0 10px;
+                text-decoration: none;
+              }
+            </style>
+            </head>
+            <body>
+              <h1>Hello from ASG</h1>
+            </body>
+            </html>
+            EOF
+            systemctl start apache2
+            systemctl enable apache2
+
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Ref ASGName
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier:
+        - !Ref privateA
+        - !Ref privateB
+      TargetGroupARNs:
+        - !Ref PrivateInstanceTargetGroup
+      MinSize: 2
+      MaxSize: 4
+      MetricsCollection:
+        - Granularity: "1Minute"
+
+  CPUAlarmHigh:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: "Scale out when CPU usage exceeds 70%"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 70
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - !Ref ScaleOutPolicy
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+
+  CPUAlarmLow:
+    Type: "AWS::CloudWatch::Alarm"
+    Properties:
+      AlarmDescription: "Scale In when CPU usage below 50%"
+      MetricName: "CPUUtilization"
+      Namespace: "AWS/EC2"
+      Statistic: "Average"
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: "LessThanThreshold"
+      AlarmActions:
+        - !Ref ScaleInPolicy
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+
+  ScaleOutPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: 2
+      Cooldown: 120
+
+  ScaleInPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      AdjustmentType: "ChangeInCapacity"
+      ScalingAdjustment: -1
+      Cooldown: 120 
+    
+  MyLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MyLambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: LambdaS3Access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${ReportBucketName}-${AWS::AccountId}"
+                  - !Sub "arn:aws:s3:::${ReportBucketName}-${AWS::AccountId}/*"
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - autoscaling:DescribeScalingActivities
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: "*"
+
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: MyASGReportLambda
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt MyLambdaRole.Arn
+      Environment:
+        Variables:
+          ASG_NAME: !Ref ASGName
+          BUCKET_NAME: !Ref MyReportBucket
+      Code:
+        ZipFile: |
+          import boto3
+          import datetime
+          import json
+          import os
+          
+          autoscaling = boto3.client('autoscaling')
+          cloudwatch = boto3.client('cloudwatch')
+          s3 = boto3.client('s3')
+          
+          ASG_NAME = os.getenv('ASG_NAME')
+          BUCKET_NAME = os.getenv('BUCKET_NAME')
+          
+          def get_instance_cpu(instance_id, start_time, end_time):
+              response = cloudwatch.get_metric_statistics(
+                  Namespace='AWS/EC2',
+                  MetricName='CPUUtilization',
+                  Dimensions=[
+                      {'Name': 'InstanceId', 'Value': instance_id}
+                  ],
+                  StartTime=start_time,
+                  EndTime=end_time,
+                  Period=300,
+                  Statistics=['Average']
+              )
+          
+              datapoints = response.get('Datapoints', [])
+              if not datapoints:
+                  return 0
+          
+              latest = sorted(datapoints, key=lambda x: x['Timestamp'])[-1]
+              return round(latest['Average'], 2)
+          
+          
+          def lambda_handler(event, context):
+              end_time = datetime.datetime.utcnow()
+              start_time = end_time - datetime.timedelta(minutes=10)
+          
+              report = {}
+          
+              asg_response = autoscaling.describe_auto_scaling_groups(
+                  AutoScalingGroupNames=[ASG_NAME]
+              )
+          
+              if not asg_response.get('AutoScalingGroups'):
+                  return {
+                      'statusCode': 404,
+                      'body': f'ASG {ASG_NAME} not found'
+                  }
+          
+              asg = asg_response['AutoScalingGroups'][0]
+              
+              report['Time'] = end_time.isoformat()
+              report['asg_name'] = ASG_NAME
+              report['desired_capacity'] = asg.get('DesiredCapacity')
+              report['min_size'] = asg.get('MinSize')
+              report['max_size'] = asg.get('MaxSize')
+          
+              instance_report = []
+              total_cpu = 0.0
+              instance_count = 0
+          
+              for instance in asg.get('Instances', []):
+                  instance_id = instance.get('InstanceId')
+                  cpu = get_instance_cpu(instance_id, start_time, end_time)
+          
+                  total_cpu += cpu
+                  instance_count += 1
+          
+                  instance_report.append({
+                      'instance_id': instance_id,
+                      'lifecycle_state': instance.get('LifecycleState'),
+                      'health_status': instance.get('HealthStatus'),
+                      'cpu_utilization': cpu
+                  })
+          
+              average_cpu = round(total_cpu / instance_count, 2) if instance_count > 0 else 0
+          
+              report['instance_count'] = instance_count
+              report['average_cpu_utilization'] = average_cpu
+              report['instances'] = instance_report
+          
+              scaling_response = autoscaling.describe_scaling_activities(
+                  AutoScalingGroupName=ASG_NAME,
+                  MaxRecords=20
+              )
+          
+              activities = []
+              for activity in scaling_response.get('Activities', []):
+                  activities.append({
+                      'activity_id': activity.get('ActivityId'),
+                      'description': activity.get('Description'),
+                      'cause': activity.get('Cause'),
+                      'status': activity.get('StatusCode'),
+                      'start_time': str(activity.get('StartTime'))
+                  })
+          
+              report['scaling_activities'] = activities
+          
+              key = f"asg-reports/asg_report_{end_time.strftime('%Y%m%d_%H%M%S')}.json"
+          
+              s3.put_object(
+                  Bucket=BUCKET_NAME,
+                  Key=key,
+                  Body=json.dumps(report, indent=4, default=str)
+              )
+          
+              return {
+                  'statusCode': 200,
+                  'report_location': f"s3://{BUCKET_NAME}/{key}",
+                  'average_cpu_utilization': average_cpu
+              }
+
+  MyReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ReportBucketName}-${AWS::AccountId}"
+
+  HourlyLambdaSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${AWS::StackName}-hourly-lambda"
+      ScheduleExpression: cron(0 * * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt MyLambdaFunction.Arn
+          Id: LambdaTarget
+          
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MyLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HourlyLambdaSchedule.Arn
+
+Outputs:
+  LoadBalancerDNS:
+    Value: !GetAtt InternetLoadBalancer.DNSName
+  BucketName:
+    Value: !Ref MyReportBucket
+  LambdaName:
+    Value: !Ref MyLambdaFunction
+  ASGName:
+    Value: !Ref AutoScalingGroup
