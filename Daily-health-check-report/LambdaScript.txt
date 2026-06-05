@@ -1,0 +1,73 @@
+import boto3
+import datetime
+import json
+
+def lambda_handler(event, context):
+    cloudwatch = boto3.client('cloudwatch')
+    autoscaling = boto3.client('autoscaling')
+    s3 = boto3.client('s3')
+
+    end_time = datetime.datetime.utcnow()
+    start_time = end_time - datetime.timedelta(hours=24)
+
+    # CPU Utilization
+    cpu_response = cloudwatch.get_metric_data(
+        MetricDataQueries=[
+            {
+                'Id': 'cpuUtil',
+                'MetricStat': {
+                    'Metric': {
+                        'Namespace': 'AWS/EC2',
+                        'MetricName': 'CPUUtilization',
+                        'Dimensions': [
+                            {'Name': 'AutoScalingGroupName', 'Value': 'my-asg'}
+                        ]
+                    },
+                    'Period': 3600,
+                    'Stat': 'Average'
+                },
+                'ReturnData': True
+            }
+        ],
+        StartTime=start_time,
+        EndTime=end_time
+    )
+
+    # Create JSON report
+    Report_data = {
+        'Health_check': {},
+        'Scaling_activity': {}
+    }
+
+    timestamps = cpu_response['MetricDataResults'][0]['Timestamps']
+    values = cpu_response['MetricDataResults'][0]['Values']
+
+    for i in range(len(timestamps)):
+        Report_data['Health_check'][str(timestamps[i])] = values[i]
+
+    # Scaling Activities
+    scaling_response = autoscaling.describe_scaling_activities(
+        AutoScalingGroupName='my-asg',
+        MaxRecords=10
+    )
+
+    for activity in scaling_response['Activities']:
+        Report_data['Scaling_activity'][activity['Cause']] = {
+            'StartTime': str(activity['StartTime']),
+            'Description': activity['Description']
+        }
+
+    # Convert to JSON
+    json_data = json.dumps(Report_data, default=str)
+
+    # Upload to S3
+    s3.put_object(
+        Bucket='my-report-bucket',
+        Key=f'reports/asg_report_{end_time.strftime("%Y%m%d%H%M%S")}.json',
+        Body=json_data
+    )
+
+    return {
+        'status': 'success',
+        's3_key': f'reports/asg_report_{end_time.strftime("%Y%m%d%H%M%S")}.json'
+    }
