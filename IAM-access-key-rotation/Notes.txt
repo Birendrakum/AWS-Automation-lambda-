@@ -1,0 +1,69 @@
+iam list_user()
+Response:
+{
+  "Users": [
+    {
+      "Path": "/",
+      "UserName": "alice",
+      "UserId": "AIDAEXAMPLE123456789",
+      "Arn": "arn:aws:iam::123456789012:user/alice",
+      "CreateDate": "2025-01-01T10:00:00Z",
+      "PasswordLastUsed": "2025-06-01T09:30:00Z",
+      "PermissionsBoundary": {
+        "PermissionsBoundaryType": "Policy",
+        "PermissionsBoundaryArn": "arn:aws:iam::123456789012:policy/BoundaryPolicy"
+      },
+      "Tags": [
+        {
+          "Key": "Department",
+          "Value": "Security"
+          "owner": "alice"
+        }
+      ]
+    }
+  ],
+  "IsTruncated": false
+}
+
+iam.list_access_keys()
+Response:
+{
+  "AccessKeyMetadata": [
+    {
+      "UserName": "developer-user",
+      "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
+      "Status": "Active",
+      "CreateDate": "2025-01-10T12:00:00Z"
+    }
+  ],
+  "IsTruncated": false
+}
+
+iam create_access_key()
+Response:
+{
+  "AccessKey": {
+    "UserName": "developer-user",
+    "AccessKeyId": "AKIAEXAMPLENEWKEY",
+    "Status": "Active",
+    "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "CreateDate": "2026-06-07T12:00:00Z"
+  }
+}
+
+secret manager create_secret()
+Response:
+{
+  "ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:developer-user-access-key-rotation-AbCdEf",
+  "Name": "developer-user-access-key-rotation",
+  "VersionId": "1234abcd-5678-efgh-9012-ijklmnopqrst"
+}
+
+secret manager put_secret()
+Response:
+{
+  "ARN": "arn:aws:secretsmanager:us-east-1:123456789012:secret:developer-user-access-key-rotation-AbCdEf",
+  "Name": "developer-user-access-key-rotation",
+  "VersionId": "5678abcd-1234-efgh-9012-ijklmnopqrst"
+}
+
